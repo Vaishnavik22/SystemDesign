@@ -17,7 +17,7 @@ class Request {
 
 	}
 
-	public RequestType getRequestTpe() {
+	public RequestType getRequestType() {
 		return this.requestType;
 	}
 
@@ -39,8 +39,8 @@ class ExternalRequest extends Request {
 
 	public ExternalRequest() {}
 
-	public ExternalRequest(RequestType requestType, int floor, Direction direction) {
-		super(requestType, floor);
+	public ExternalRequest(int floor, Direction direction) {
+		super(RequestType.EXTERNAL_REQUEST, floor);
 		this.direction = direction;
 	}
 
@@ -58,8 +58,8 @@ class InternalRequest extends Request() {
 
 	public InternalRequest() {}
 
-	public InternalRequest(RequestType requestType, int floor, int elevatorNumber) {
-		super(requestType, floor);
+	public InternalRequest(int floor, int elevatorNumber) {
+		super(RequestType.INTERNAL_REQUEST, floor);
 		this.elevatorNumber = elevatorNumber;
 	}
 
@@ -76,24 +76,24 @@ class Elevator {
 	int currentFloor;
 	Direction currentDirection;
 	int elevatorNumber;
-	int maxFloors = 10;
+	int maxFloors;
 
-	LinkedList<Request> currentJobs;
-	LinkedList<Request> pendingUpJobs;
-	LinkedList<Request> pendingDownJobs;
+	ConcurrentLinkedQueue<Request> currentJobs;
+	ConcurrentLinkedQueue<Request> pendingUpJobs;
+	ConcurrentLinkedQueue<Request> pendingDownJobs;
 
 	public Elevator() {}
 
-	public Elevator(int currentFloor, Direction currentDirection, int elevatorNumber) {
-		this.currentFloor = currentFloor;
-		this.currentDirection = currentDirection;
+	public Elevator(int elevatorNumber, int maxFloors) {
+		this.currentFloor = 0;
+		this.currentDirection = Direction.UP;
 		this.elevatorNumber = elevatorNumber;
+		this.maxFloors = maxFloors;
 
-		// TODO: figure out how to make these thread safe
-		currentJobs = new LinkedList<>();
-		pendingUpJobs = new LinkedList<>();
+		currentJobs = new ConcurrentLinkedQueue<>();
+		pendingUpJobs = new ConcurrentLinkedQueue<>();
 		// Sort it in descending order
-		pendingDownJobs = new LinkedList<>((j1, j2) -> j2.floor - j1.floor);
+		pendingDownJobs = new ConcurrentLinkedQueue<>((j1, j2) -> j2.floor - j1.floor);
 	}
 
 	public Direction getCurrentDirection() {
@@ -126,16 +126,14 @@ class Elevator {
 				processCurrentJobs();
 			} else if (currentDirection == Direction.DOWN) {
 				if (pendingUpJobs.size() > 0) {
-					LinkedList<Request> temp = currentJobs;
-					currentJobs = pendingUpJobs;
-					pendingUpJobs = currentJobs;
+					currentJobs.addAll(pendingUpJobs);
+					pendingUpJobs.clear();
 					currentDirection = Direction.UP;
 				}
 			} else if (currentDirection == Direction.UP) {
 				if (pendingDownJobs.size() > 0) {
-					LinkedList<Request> temp = currentJobs;
-					currentJobs = pendingDownJobs;
-					pendingDownJobs = currentJobs;
+					currentJobs.addAll(pendingDownJobs);
+					pendingDownJobs.clear();
 					currentDirection = Direction.DOWN;
 				}
 			}
@@ -143,19 +141,20 @@ class Elevator {
 	}
 
 	private void processCurrentJobs() {
-
+		int startFloor = currentJobs.peekFirst().getFloor();
+		currentFloor = startFloor;
 		if (currentDirection == Direction.UP) {
-			for (int startFloor = currentFloor; startFloor <= maxFloors && !currentJobs.isEmpty(); ++startFloor) {
+			for (; startFloor <= maxFloors && !currentJobs.isEmpty(); ++startFloor) {
 				if (startFloor == currentJobs.peekFirst().getFloor()) {
 					Request r = currentJobs.pollFirst();
-					System.out.println("Exceuting request type: " + r.getRequestTpe() + " on floor  " + r.getFloor());
+					System.out.println("Moving Up. Exceuting request type: " + r.getRequestType() + " on floor  " + r.getFloor());
 				}
 			}
 		} else {
-			for (int startFloor = maxFloors; startFloor >= 0 && !currentJobs.isEmpty(); --startFloor) {
+			for (; startFloor >= 0 && !currentJobs.isEmpty(); --startFloor) {
 				if (startFloor == currentJobs.peekFirst().getFloor()) {
 					Request r = currentJobs.pollFirst();
-					System.out.println("Exceuting request type: " + r.getRequestTpe() + " on floor  " + r.getFloor());
+					System.out.println("Moving down. Exceuting request type: " + r.getRequestType() + " on floor  " + r.getFloor());
 				}
 			}
 		}
@@ -163,13 +162,13 @@ class Elevator {
 
 	public void addRequest(Request request) {
 		if (request.getDirection() == Direction.UP) {
-			if (currentFloor < request.getFloor()) {
+			if (currentFloor < request.getFloor() && currentDirection == Direction.UP) {
 				currentJobs.add(request);
 			} else {
 				pendingUpJobs.add(request);
 			}
 		} else {
-			if (currentFloor > request.getFloor()) {
+			if (currentFloor > request.getFloor() && currentDirection == Direction.DOWN) {
 				currentJobs.add(request);
 			} else {
 				pendingDownJobs.add(request);
@@ -190,25 +189,61 @@ class ElevatorWorker implements Runnable {
 	}
 }
 
+class AddRequestsWorker implements Runnable {
+	Elevator elevator;
+	Request request;
+
+	public AddRequestsWorker(Elevator elevator, Request request) {
+		this.elevator = elevator;
+		this.request = request;
+	}
+
+	public void run() {
+		elevator.addRequest(request);
+	}
+}
+
 class Coordinator {
-	public static void main(String args[]) {
-		List<Thread> threads = new ArrayList<>();
-		List<Elevator> elevators = new ArrayList<>();
+	LinkedList<Elevator> elevators;
+	int elevatorCount;
+	ExecutorService elevatorExecutor;
+	ExecutorService addRequestExecutor;
+	Queue<Request> requestsToProcess;
+	int nextElevatorToSendRequest;
+	public final maxFloors = 10;
 
-		for (int i = 0; i < 5; ++i) {
-			Elevator elevator = new Elevator();
-			elevator.setElevatorNumber(i);
+	public Coordinator(int elevatorCount) {
+		this.elevatorCount = elevatorCount;
+		elevators = new LinkedList<>();
+		elevatorExecutor = Executors.newFixedThreadPool(elevatorCount);
+		addRequestExecutor = Executors.newFixedThreadPool(elevatorCount);
+		requestsToProcess = new LinkedList<>();
+		nextElevatorToSendRequest = 1;
+
+		for (int i = 0; i < elevatorCount; ++i) {
+			Elevator elevator = new Elevator(i, maxFloors);
 			ElevatorWorker worker = new ElevatorWorker(elevator);
-			Thread thread = new Thread(worker);
-			threads.add(thread);
+			elevatorExecutor.execute(worker);
 		}
+	}
 
-		// Add requests
-		for (int i = 0; i < 10; ++i) {
-			Elevator e = elevators.get(i % 5);
-			e.addRequest(new ExternalRequest());
-			e.addRequest(new InternalRequest());
+	public static void main(String args[]) {
+		processRequests();
+	}
+
+	private void processRequests() {
+		while (true) {
+			if (!requestsToProcess.isEmpty()) {
+				Request r = requestsToProcess.poll();
+
+				if (r.getRequestType() == RequestType.INTERNAL_REQUEST) {
+					addRequestExecutor.execute(new AddRequestsWorker(elevators.get(r.getElevatorNumber()), r));
+				} else {
+					// Send requests in a round robin manner
+					addRequestExecutor.execute(new AddRequestsWorker(elevators.get(nextElevatorToSendRequest), r));
+					nextElevatorToSendRequest = (nextElevatorToSendRequest + 1) % elevatorCount;
+				}
+			}
 		}
-
 	}
 }

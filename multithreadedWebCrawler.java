@@ -24,7 +24,10 @@ class Solution {
     HtmlParser htmlParser = null;
     List<String> result = null;
     Queue<Future> tasks = null;
-    LinkedBlockingQueue<String> queue = null;
+    // LinkedBlockingQueue is a blocking implementation - will block until queue is not empty.
+    // Use ConcurrentLinkedQueue instead which is a non-blocking queue
+    
+    ConcurrentLinkedQueue<String> queue = null;
     HashSet<String> visitedUrls = null;
     String hostname = null;
     
@@ -49,7 +52,7 @@ class Solution {
         this.htmlParser = htmlParser;
         result = new ArrayList<>();
         tasks = new LinkedList<>();
-        queue = new LinkedBlockingQueue<>();
+        queue = new ConcurrentLinkedQueue<>();
         visitedUrls = new HashSet<>();
         hostname = getHostname(startUrl);
         
